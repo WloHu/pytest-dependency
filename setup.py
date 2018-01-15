@@ -50,7 +50,7 @@ class sdist(st_sdist.sdist):
 
 
 setup(
-    name='pytest-dependency',
+    name='pytest-dependency-x',
     version=__version__,
     description='Manage dependencies of tests',
     author='Rolf Krahl',
