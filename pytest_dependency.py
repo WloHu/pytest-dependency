@@ -4,6 +4,7 @@ __version__ = "$VERSION"
 __revision__ = "$REVISION"
 
 import pytest
+import re
 
 _automark = False
 _ignore_unknown = False
@@ -21,6 +22,23 @@ def _get_bool(value):
             raise ValueError("Invalid truth value '%s'" % value)
     else:
         return False
+
+CLASS_NAME = 'class_name'
+FUNC_NAME = 'func_name'
+PARAMS_NAME = 'params_name'
+node_name_regexp = (r'((?P<{}>\w+)::)?'
+                    r'(?P<{}>\w+)'
+                    r'(\[(?P<{}>.*)\])?'
+                    ).format(CLASS_NAME, FUNC_NAME, PARAMS_NAME)
+regexpp = re.compile(node_name_regexp)
+def _split_node_name(name):
+    md = regexpp.match(name).groupdict()
+    c, f, p = md[CLASS_NAME], md[FUNC_NAME], md[PARAMS_NAME]
+    print c, f, p
+    return c, f, p
+
+
+
 
 
 class DependencyItemStatus(object):
@@ -42,6 +60,12 @@ class DependencyItemStatus(object):
     def isSuccess(self):
         return list(self.results.values()) == ['passed', 'passed', 'passed']
 
+    def __bool__(self):
+        return self.isSuccess()
+
+    __nonzero__ = __bool__
+
+from collections import defaultdict
 
 class DependencyManager(object):
     """Dependency manager, stores the results of tests.
@@ -61,28 +85,71 @@ class DependencyManager(object):
 
     def __init__(self):
         self.results = {}
+        self.results_by_name = defaultdict(set)
 
-    def addResult(self, item, name, rep):
-        if not name:
-            if item.cls:
-                name = "%s::%s" % (item.cls.__name__, item.name)
-            else:
-                name = item.name
-        status = self.results.setdefault(name, DependencyItemStatus())
-        status.addResult(rep)
+    def addResult(self, item, dependency_name, rep):
+        if item.cls:
+            node_name = "%s::%s" % (item.cls.__name__, item.name)
+        else:
+            node_name = item.name
 
-    def checkDepend(self, depends, item):
-        for i in depends:
-            if i in self.results:
-                if self.results[i].isSuccess():
-                    continue
-            else:
-                if _ignore_unknown:
-                    continue
-            pytest.skip("%s depends on %s" % (item.name, i))
+        class_name, func_name, params_repr = _split_node_name(node_name)
+        testcase_id = (dependency_name, class_name, func_name, params_repr)
+
+        dependency_status = self.results.setdefault(testcase_id, DependencyItemStatus())
+        dependency_status.addResult(rep)
+
+        for name in testcase_id:
+            if name:
+                self.results_by_name[name].add(dependency_status)
+
+    def checkDepend(self, dependencies, item, jajo):
+        conditions[jajo](self, dependencies, item)
 
 
-def depends(request, other):
+def _all(self, dependencies, item):
+    for dependency_id in dependencies:
+        results = self.results_by_name.get(dependency_id)
+        if results:
+            if all(results):
+                continue
+        else:
+            if _ignore_unknown:
+                continue
+        pytest.skip("%s depends on %s" % (item.name, dependency_id))
+
+def _any(self, dependencies, item):
+    for dependency_id in dependencies:
+        results = self.results_by_name.get(dependency_id)
+        if results:
+            if any(results):
+                return
+        else:
+            if _ignore_unknown:
+                continue
+    pytest.skip("%s depends on %s" % (item.name, dependency_id))
+
+
+def _each(self, dependencies, item):
+    for dependency_id in dependencies:
+        results = self.results_by_name.get(dependency_id)
+        if results:
+            if any(results):
+                continue
+        else:
+            if _ignore_unknown:
+                continue
+        pytest.skip("%s depends on %s" % (item.name, dependency_id))
+
+
+conditions = {
+    'all': _all,
+    'any': _any,
+    'each': _each,
+}
+
+
+def depends(request, other, jajo='all'):
     """Add dependency on other test.
 
     Call pytest.skip() unless a successful outcome of all of the tests in
@@ -99,17 +166,20 @@ def depends(request, other):
 
     .. versionadded:: 0.2
     """
-    item = request.node
+    _checkDepend(other, request.node, jajo)
+
+
+def _checkDepend(dependencies, item, jajo='all'):
     manager = DependencyManager.getManager(item)
-    manager.checkDepend(other, item)
+    manager.checkDepend(dependencies, item, jajo)
 
 
 def pytest_addoption(parser):
-    parser.addini("automark_dependency", 
-                  "Add the dependency marker to all tests automatically", 
+    parser.addini("automark_dependency",
+                  "Add the dependency marker to all tests automatically",
                   default=False)
-    parser.addoption("--ignore-unknown-dependency", 
-                     action="store_true", default=False, 
+    parser.addoption("--ignore-unknown-dependency",
+                     action="store_true", default=False,
                      help="ignore dependencies whose outcome is not known")
 
 
@@ -117,10 +187,6 @@ def pytest_configure(config):
     global _automark, _ignore_unknown
     _automark = _get_bool(config.getini("automark_dependency"))
     _ignore_unknown = config.getoption("--ignore-unknown-dependency")
-    config.addinivalue_line("markers", 
-                            "dependency(name=None, depends=[]): "
-                            "mark a test to be used as a dependency for "
-                            "other tests or to depend on other tests.")
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
@@ -143,6 +209,7 @@ def pytest_runtest_setup(item):
     marker = item.get_marker("dependency")
     if marker is not None:
         depends = marker.kwargs.get('depends')
+        jajo = marker.kwargs.get('jajo', 'all')
         if depends:
-            manager = DependencyManager.getManager(item)
-            manager.checkDepend(depends, item)
+            _checkDepend(depends, item, jajo)
+
